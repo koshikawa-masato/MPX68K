@@ -2472,6 +2472,72 @@ static void ms_handle(int fd) {
         if (strcmp(cmd,"RESUME")==0) { X68000_Monitor_SetPaused(0); ms_ok(fd); continue; }
         if (strcmp(cmd,"STATUS")==0) { ms_send(fd, X68000_Monitor_IsPaused() ? "PAUSED\n" : "RUNNING\n"); ms_ok(fd); continue; }
 
+        if (strcmp(cmd,"SETPC")==0) {
+            MS_REQUIRE_STOP_ACK("must PAUSE before SETPC");
+            if (np<2) { ms_err(fd,"usage: SETPC <addr_hex>"); continue; }
+            unsigned int pc = (unsigned int)strtoul(parts[1],nullptr,16);
+#if defined(HAVE_C68K)
+            // NB: m68000_set_reg() (and thus X68000_Monitor_SetPC) is a no-op for
+            // the C68K core — m68000.c gates its setter block on the mis-cased
+            // macro `HAVE_C68k`, which is never defined.  Call C68K directly and
+            // resync the opcode-fetch base so execution actually redirects.
+            extern c68k_struc C68K;
+            extern void cpu_setOPbase24(DWORD adr);
+            C68k_Set_PC(&C68K, pc);
+            cpu_setOPbase24((DWORD)pc);
+#else
+            X68000_Monitor_SetPC(pc);
+#endif
+            ms_ok(fd); continue;
+        }
+        if (strcmp(cmd,"SETD")==0 || strcmp(cmd,"SETA")==0) {
+            MS_REQUIRE_STOP_ACK("must PAUSE before SETD/SETA");
+            if (np<3) { ms_err(fd,"usage: SETD/SETA <n> <val_hex>"); continue; }
+            int rn = atoi(parts[1]);
+            unsigned int v = (unsigned int)strtoul(parts[2],nullptr,16);
+#if defined(HAVE_C68K)
+            extern c68k_struc C68K;
+            if (rn>=0 && rn<=7) {
+                if (cmd[3]=='D') C68k_Set_DReg(&C68K, rn, v);
+                else             C68k_Set_AReg(&C68K, rn, v);
+            }
+#else
+            if (cmd[3]=='D') X68000_Monitor_SetDReg(rn, v);
+            else             X68000_Monitor_SetAReg(rn, v);
+#endif
+            ms_ok(fd); continue;
+        }
+
+        if (strcmp(cmd,"TRACE")==0) {
+            // Single-step N instructions, emitting "PC opcode" per step. Requires
+            // PAUSE so the main emulation thread is not also advancing C68K.
+            // Used to trace the IPL ROM's SASI boot decision path instruction by
+            // instruction (e.g. where it diverges to FDD instead of the $E96007
+            // device select that fires the SCSI boot intercept).
+            MS_REQUIRE_STOP_ACK("must PAUSE before TRACE");
+#if defined(HAVE_C68K)
+            extern c68k_struc C68K;
+            int n = (np>=2) ? atoi(parts[1]) : 16;
+            if (n < 1) n = 1;
+            if (n > 4000) n = 4000;
+            char out[48];
+            for (int i=0;i<n;i++) {
+                unsigned int pc = C68k_Get_PC(&C68K) & 0x00ffffff;
+                unsigned int op = cpu_readmem24_word(pc);
+                snprintf(out,sizeof(out),"%06X %04X\n", pc, op);
+                ms_send(fd,out);
+                // A single-cycle Exec may not retire a whole instruction, so
+                // keep advancing (bounded) until PC actually moves.
+                int guard = 0;
+                do { C68k_Exec(&C68K, 4); guard++; }
+                while (((C68k_Get_PC(&C68K) & 0x00ffffff) == pc) && guard < 64);
+            }
+            ms_ok(fd); continue;
+#else
+            ms_err(fd,"TRACE requires C68K core"); continue;
+#endif
+        }
+
         if (strcmp(cmd,"REGS")==0) {
             MS_REQUIRE_STOP_ACK("must PAUSE before REGS");
             X68000MonitorCPUState s; X68000_Monitor_GetCPUState(&s);
