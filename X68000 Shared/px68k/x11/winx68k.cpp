@@ -929,9 +929,20 @@ void WinX68k_Exec(const long clockMHz, const long vsync)
 #if defined(HAVE_C68K)
 	                        // Lightweight SCSI boot checks (IPL-ROM-first architecture)
 	                        if (g_scsi_boot_pending) {
-                            // Device driver chain linking
+                            // Device driver chain linking. This block runs once
+                            // per clock slice — many times per frame — and the
+                            // link scan walks ~100KB of guest RAM looking for the
+                            // kernel's NUL device, so calling it every slice tanks
+                            // the frame rate (~5-15fps) and makes the startup logo
+                            // stutter until the device links. Throttle it: the NUL
+                            // device only appears once the booted kernel sets up,
+                            // and checking a few times per second still links it
+                            // within a fraction of a second of it appearing.
                             if (g_enable_scsi_dev_driver && !SCSI_IsDeviceLinked()) {
-                                SCSI_LinkDeviceDriver();
+                                static unsigned int s_link_scan_throttle = 0;
+                                if ((s_link_scan_throttle++ & 0xFF) == 0) {
+                                    SCSI_LinkDeviceDriver();
+                                }
                             }
                             // IOCS[$F5] safety pin: ensure SCSI IOCS handler stays patched
                             DWORD f5 = Memory_ReadD(0x7D4) & 0x00FFFFFFU;
