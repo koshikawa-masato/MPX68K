@@ -2563,6 +2563,34 @@ static void ms_handle(int fd) {
 #endif
         }
 
+        if (strcmp(cmd,"TRACER")==0) {
+            // Like TRACE but also dumps D0/D1/A0/A1 per step, for following data
+            // flow (e.g. the IOCS function number in D0 at the $400+D0*4 vector
+            // dispatch that decides SASI success vs FDD fallback).
+            MS_REQUIRE_STOP_ACK("must PAUSE before TRACER");
+#if defined(HAVE_C68K)
+            extern c68k_struc C68K;
+            int n = (np>=2) ? atoi(parts[1]) : 16;
+            if (n < 1) n = 1;
+            if (n > 2000) n = 2000;
+            char out[128];
+            for (int i=0;i<n;i++) {
+                unsigned int pc = C68k_Get_PC(&C68K) & 0x00ffffff;
+                unsigned int op = cpu_readmem24_word(pc);
+                snprintf(out,sizeof(out),"%06X %04X D0=%08X D1=%08X A0=%08X A1=%08X\n",
+                         pc, op, C68k_Get_DReg(&C68K,0), C68k_Get_DReg(&C68K,1),
+                         C68k_Get_AReg(&C68K,0), C68k_Get_AReg(&C68K,1));
+                ms_send(fd,out);
+                int guard = 0;
+                do { C68k_Exec(&C68K, 4); guard++; }
+                while (((C68k_Get_PC(&C68K) & 0x00ffffff) == pc) && guard < 64);
+            }
+            ms_ok(fd); continue;
+#else
+            ms_err(fd,"TRACER requires C68K core"); continue;
+#endif
+        }
+
         if (strcmp(cmd,"REGS")==0) {
             MS_REQUIRE_STOP_ACK("must PAUSE before REGS");
             X68000MonitorCPUState s; X68000_Monitor_GetCPUState(&s);
