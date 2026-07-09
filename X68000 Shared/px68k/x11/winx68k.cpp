@@ -1045,8 +1045,15 @@ int original_main(int argc, const char *argv[], const long samplingrate )
     dosio_init();
     file_setcd(const_cast<char*>("./"));
     LoadConfig();
-	
+
 	Config.SampleRate = (int)samplingrate;
+
+    // Force auto frame-skip on every startup regardless of the saved ini.
+    // FrameRate==7 is the auto-skip mode (see Update(): it drains FrameSkipQueue
+    // and drops display frames when a frame overruns its 14/16ms budget), which
+    // keeps heavy sequences (BIOS RAM check at high clock, OS boot) from
+    // stalling the emulation loop.
+    Config.FrameRate = 7;
 
     StatBar_Show(Config.WindowFDDStat);
     WinDraw_ChangeSize();
