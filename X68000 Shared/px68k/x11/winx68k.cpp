@@ -2563,6 +2563,35 @@ static void ms_handle(int fd) {
 #endif
         }
 
+        if (strcmp(cmd,"STEPTO")==0) {
+            // Single-step until PC == target (or maxsteps). Safe only across a
+            // timer-free deterministic stretch (e.g. the SASI probe after
+            // BREAKSASI) — single-step does not advance MFP timers, so it hangs
+            // on boot-time timer-wait loops. Returns hit/PC/steps.
+            MS_REQUIRE_STOP_ACK("must PAUSE before STEPTO");
+#if defined(HAVE_C68K)
+            extern c68k_struc C68K;
+            if (np<2) { ms_err(fd,"usage: STEPTO <pc_hex> [maxsteps]"); continue; }
+            unsigned int target = (unsigned int)strtoul(parts[1],nullptr,16) & 0x00ffffff;
+            long maxsteps = (np>=3) ? atol(parts[2]) : 5000;
+            long steps = 0; int hit = 0;
+            while (steps < maxsteps) {
+                if ((C68k_Get_PC(&C68K) & 0x00ffffff) == target) { hit = 1; break; }
+                unsigned int pc = C68k_Get_PC(&C68K) & 0x00ffffff;
+                int guard = 0;
+                do { C68k_Exec(&C68K, 4); guard++; }
+                while (((C68k_Get_PC(&C68K) & 0x00ffffff) == pc) && guard < 64);
+                steps++;
+            }
+            char out[64];
+            snprintf(out,sizeof(out),"hit=%d pc=%06X steps=%ld\n",
+                     hit, C68k_Get_PC(&C68K)&0x00ffffff, steps);
+            ms_send(fd,out); ms_ok(fd); continue;
+#else
+            ms_err(fd,"STEPTO requires C68K core"); continue;
+#endif
+        }
+
         if (strcmp(cmd,"TRACER")==0) {
             // Like TRACE but also dumps D0/D1/A0/A1 per step, for following data
             // flow (e.g. the IOCS function number in D0 at the $400+D0*4 vector
