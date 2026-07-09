@@ -1121,7 +1121,13 @@ int original_main(int argc, const char *argv[], const long samplingrate )
 
 extern "C" int X68000_Monitor_ConsumePauseRequest(void);
 
+// Monotonic frame counter, sampled by the DIAG monitor command to tell a
+// healthy-but-idle emulator (counter advancing) from a wedged frame loop
+// (counter frozen) without needing a screenshot.
+volatile unsigned long g_update_count = 0;
+
 void Update(const long clockMHz, const int vsync ) {
+    g_update_count++;
     if (X68000_Monitor_ConsumePauseRequest()) {
         return;
     }
@@ -2367,7 +2373,32 @@ void X68000_Monitor_GetHardwareState(int section, char* out, int outSize)
 #include <errno.h>
 #include <ctype.h>
 
-#define MONITOR_SOCKET_PATH "/tmp/mpx68k_monitor.sock"
+// Legacy default path.  On sandboxed macOS builds /tmp is not writable, so the
+// bind() used to fail with EPERM and the monitor never came up.  ms_socket_path()
+// resolves a writable location at runtime: inside the sandbox HOME points at the
+// app container's Data directory, which we can bind in.  Falls back to /tmp on
+// non-sandboxed builds.  Override with the MPX68K_MONITOR_SOCK environment var.
+#define MONITOR_SOCKET_PATH_FALLBACK "/tmp/mpx68k_monitor.sock"
+
+static const char* ms_socket_path(void) {
+    static char path[104];   // sizeof(sockaddr_un.sun_path) on macOS
+    if (path[0]) return path;
+    const char* env = getenv("MPX68K_MONITOR_SOCK");
+    if (env && env[0] && strlen(env) < sizeof(path)) {
+        strncpy(path, env, sizeof(path) - 1);
+        return path;
+    }
+    const char* home = getenv("HOME");
+    if (home && home[0]) {
+        // "<HOME>/mpx68k_monitor.sock" must fit in sun_path (104 incl. NUL).
+        if (strlen(home) + strlen("/mpx68k_monitor.sock") < sizeof(path)) {
+            snprintf(path, sizeof(path), "%s/mpx68k_monitor.sock", home);
+            return path;
+        }
+    }
+    strncpy(path, MONITOR_SOCKET_PATH_FALLBACK, sizeof(path) - 1);
+    return path;
+}
 
 static int          s_server_fd = -1;
 static pthread_t    s_thread;
@@ -2527,9 +2558,44 @@ static void ms_handle(int fd) {
             ms_send(fd,buf); ms_send(fd,"\n"); ms_ok(fd); continue;
         }
 
+        if (strcmp(cmd,"DIAG")==0) {
+            // Read-only boot snapshot. Unlike REGS it does NOT require PAUSE, so
+            // it still answers while a guest program is stuck spinning. All reads
+            // are plain scalar loads shared with the emu thread (racy but benign
+            // for diagnostics). The frame counter distinguishes a live-but-idle
+            // frame loop (advances between calls) from a wedged one (frozen).
+            extern volatile unsigned long g_update_count;
+            X68000MonitorCPUState st; X68000_Monitor_GetCPUState(&st);
+            const char* busName =
+                (g_storage_bus_mode==0) ? "SASI" :
+                (g_storage_bus_mode==1) ? "SCSI" :
+                (g_storage_bus_mode==2) ? "SCSI-U" : "?";
+            char out[1600];
+            snprintf(out, sizeof(out),
+                "frame=%lu paused=%d\n"
+                "bus=%s(%d) scsi0_mounted=%d scsi_img_bytes=%ld\n"
+                "scsi_boot_pending=%d scsi_dev_driver_enabled=%d scsi_dev_linked=%d scsi_rom_present=%d\n"
+                "sram_ED0018=0x%02X (boot: %s)\n"
+                "PC=%08X SR=%04X A7=%08X\n"
+                "FDD0=%s\n"
+                "FDD1=%s\n"
+                "HD0=%s\n",
+                g_update_count, X68000_Monitor_IsPaused(),
+                busName, g_storage_bus_mode, g_scsi0_mounted, s_disk_image_buffer_size[4],
+                g_scsi_boot_pending, g_enable_scsi_dev_driver,
+                SCSI_IsDeviceLinked(), SCSI_IsROMPresent(),
+                SRAM[0x18 ^ 1], (SRAM[0x18 ^ 1] & 0x80) ? "HDD" : "FDD/STD",
+                st.pc, st.sr, st.a[7],
+                Config.FDDImage[0][0] ? Config.FDDImage[0] : "(none)",
+                Config.FDDImage[1][0] ? Config.FDDImage[1] : "(none)",
+                Config.HDImage[0][0]  ? Config.HDImage[0]  : "(none)");
+            ms_send(fd,out); ms_ok(fd); continue;
+        }
+
         if (strcmp(cmd,"HELP")==0) {
             ms_send(fd,
                 "Commands:\n"
+                "  DIAG               read-only boot snapshot (no PAUSE needed)\n"
                 "  PAUSE              pause emulation\n"
                 "  RESUME             resume emulation\n"
                 "  STATUS             show PAUSED/RUNNING\n"
@@ -2581,12 +2647,13 @@ static void* ms_server_thread(void*) {
 }
 
 extern "C" void MonitorSocket_Start(void) {
-    unlink(MONITOR_SOCKET_PATH);
+    const char* sockPath = ms_socket_path();
+    unlink(sockPath);
     s_server_fd=socket(AF_UNIX,SOCK_STREAM,0);
     if (s_server_fd<0) { perror("mpx68k monitor: socket"); return; }
     struct sockaddr_un addr; memset(&addr,0,sizeof(addr));
     addr.sun_family=AF_UNIX;
-    strncpy(addr.sun_path,MONITOR_SOCKET_PATH,sizeof(addr.sun_path)-1);
+    strncpy(addr.sun_path,sockPath,sizeof(addr.sun_path)-1);
     if (bind(s_server_fd,(struct sockaddr*)&addr,sizeof(addr))<0) {
         perror("mpx68k monitor: bind"); close(s_server_fd); s_server_fd=-1; return;
     }
@@ -2600,10 +2667,10 @@ extern "C" void MonitorSocket_Start(void) {
         s_running = 0;
         close(s_server_fd);
         s_server_fd = -1;
-        unlink(MONITOR_SOCKET_PATH);
+        unlink(sockPath);
         return;
     }
-    fprintf(stderr,"[MPX68K] Machine Monitor socket: %s\n",MONITOR_SOCKET_PATH);
+    fprintf(stderr,"[MPX68K] Machine Monitor socket: %s\n",sockPath);
 }
 
 extern "C" void MonitorSocket_Stop(void) {
@@ -2612,7 +2679,7 @@ extern "C" void MonitorSocket_Stop(void) {
     if (s_client_fd>=0) { shutdown(s_client_fd,SHUT_RDWR); close(s_client_fd); s_client_fd=-1; }
     pthread_mutex_unlock(&s_client_fd_mutex);
     if (s_server_fd>=0) { shutdown(s_server_fd,SHUT_RDWR); close(s_server_fd); s_server_fd=-1; }
-    unlink(MONITOR_SOCKET_PATH);
+    unlink(ms_socket_path());
     if (s_thread_started) {
         pthread_join(s_thread,nullptr);
         s_thread_started = 0;
