@@ -139,13 +139,20 @@ BYTE FASTCALL SRAM_Read(DWORD adr)
 	else
 		val = 0xff;
 
-	/* Log reads of boot device byte $ED0018/$ED0019 */
-	if ((adr & 0xfffe) == 0x0018) {
-		extern void SCSI_LogText(const char *text);
-		char sl[96];
-		snprintf(sl, sizeof(sl), "SRAM_R adr=$ED%04X val=$%02X (raw_idx=%04X)",
-			(unsigned)((adr ^ 1) + 0xED0000), (unsigned)val, (unsigned)adr);
-		SCSI_LogText(sl);
+	/* Force HDD-boot on the boot-device byte ($ED0018 -> raw index 0x19)
+	 * whenever a SCSI HDD is the active boot medium.  WinX68k_Reset() writes
+	 * $80 here for SCSI mode, but an async disk-state restore can re-init the
+	 * SRAM array back to $00 (FDD boot) before the IPL ROM reads it.  With
+	 * $00 the IPL boots the (usually empty) FDD and never performs the
+	 * $E96007 device select that SASI_Write() intercepts to hand off to the
+	 * SCSI boot injection, so the SCSI HDD never boots.  Returning $80 at the
+	 * read point makes the IPL attempt HDD boot regardless of the array
+	 * contents.  $ED0019 (raw index 0x18, high byte) is left untouched. */
+	if (adr == 0x0019) {
+		extern int X68000_GetStorageBusMode(void);
+		extern int X68000_SCSI_IsMounted(int host, int id);
+		if (X68000_GetStorageBusMode() == 1 && X68000_SCSI_IsMounted(0, 0))
+			val = 0x80;
 	}
 
 	return val;

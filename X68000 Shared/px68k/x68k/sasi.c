@@ -354,6 +354,15 @@ BYTE FASTCALL SASI_Read(DWORD adr)
 			ret |= 0x0c;		// I/O & C/D
 		if (SASI_Phase==5)
 			ret |= 0x10;		// MSG
+		/* SCSI-boot handoff: when a SCSI HDD is the boot medium the SASI
+		 * boot intercept is armed, but the XVI IPL probes this status port
+		 * (BTST #6) to decide HDD-vs-FDD boot and, seeing the idle SASI bus
+		 * with bit 6 clear, falls back to the (empty) FDD before it ever
+		 * issues the $E96007 device select that SASI_Write() intercepts.
+		 * Assert bit 6 while idle so the IPL takes the HDD path and reaches
+		 * the select, letting SCSI_InjectBoot() fire. */
+		if ((SASI_Phase==0) && s_scsi_boot_intercept_armed)
+			ret |= 0x40;		// device present (drives IPL to HDD boot)
 	}
 	else if (adr ==0xe96001)
 	{
