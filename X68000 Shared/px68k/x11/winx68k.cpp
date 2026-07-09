@@ -777,6 +777,8 @@ WinX68k_Cleanup(void)
 // -----------------------------------------------------------------------------------
 //  �����Τᤤ��롼��
 // -----------------------------------------------------------------------------------
+extern "C" void X68000_Monitor_SetPaused(int paused);
+
 void WinX68k_Exec(const long clockMHz, const long vsync)
 {
     //char *test = NULL;
@@ -902,6 +904,18 @@ void WinX68k_Exec(const long clockMHz, const long vsync)
                         C68k_Exec(&C68K, n);
                         if (SCSI_HasDeferredBoot()) {
                             SCSI_CommitDeferredBoot();
+                        }
+                        {
+                            // Debug break: SASI_Read released the timeslice at the
+                            // SASI-detection probe. Freeze the CPU there (exit the
+                            // clock-slice loop now, before running further slices)
+                            // so the monitor can TRACE the HDD-vs-FDD decision.
+                            extern int g_break_on_sasi_probe, g_sasi_probe_hit;
+                            if (g_break_on_sasi_probe && g_sasi_probe_hit) {
+                                g_break_on_sasi_probe = 0;
+                                X68000_Monitor_SetPaused(1);
+                                break;
+                            }
                         }
 #endif /* HAVE_C68K */
                         m = (n-m68000_ICountBk);
@@ -2471,6 +2485,17 @@ static void ms_handle(int fd) {
         }
         if (strcmp(cmd,"RESUME")==0) { X68000_Monitor_SetPaused(0); ms_ok(fd); continue; }
         if (strcmp(cmd,"STATUS")==0) { ms_send(fd, X68000_Monitor_IsPaused() ? "PAUSED\n" : "RUNNING\n"); ms_ok(fd); continue; }
+
+        if (strcmp(cmd,"BREAKSASI")==0) {
+            // Arm a one-shot auto-pause at the IPL's SASI-detection probe
+            // ($E96003 read). RESUME (or reset the guest) and the emulator runs
+            // normally — timers live — until the probe, then freezes there so
+            // TRACE can follow the HDD-vs-FDD boot decision with a valid stack.
+            extern int g_break_on_sasi_probe, g_sasi_probe_hit;
+            g_sasi_probe_hit = 0;
+            g_break_on_sasi_probe = (np>=2) ? atoi(parts[1]) : 1;
+            ms_ok(fd); continue;
+        }
 
         if (strcmp(cmd,"SETPC")==0) {
             MS_REQUIRE_STOP_ACK("must PAUSE before SETPC");

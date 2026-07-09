@@ -31,6 +31,13 @@ BYTE SASI_SenseStatPtr = 0;
 WORD SASI_BufSize = 256;  // Current buffer size (256 for normal sectors, 8 for READ CAPACITY)
 
 int        hddtrace = 0;
+/* Debug break-on-SASI-probe (Machine Monitor). When g_break_on_sasi_probe is
+ * armed, the first $E96003 status read done with the SCSI boot intercept active
+ * sets g_sasi_probe_hit and releases the current C68K timeslice, so WinX68k_Exec
+ * can break out of its clock-slice loop and freeze the CPU exactly at the IPL's
+ * SASI HDD-vs-FDD detection — with a valid stack and live timers — for TRACE. */
+int        g_sasi_probe_hit = 0;
+int        g_break_on_sasi_probe = 0;
 static int s_scsi_boot_intercept_armed = 0;
 int s_sasi_detected = 0;  /* Set to 1 after first SASI reset ($E96005) */
 
@@ -339,6 +346,11 @@ BYTE FASTCALL SASI_Read(DWORD adr)
 
 	if (adr==0xe96003)
 	{
+		if (s_scsi_boot_intercept_armed && g_break_on_sasi_probe) {
+			g_sasi_probe_hit = 1;
+			extern c68k_struc C68K;
+			C68k_Release_Cycle(&C68K);   /* stop right after this read */
+		}
 		/* Phase=0 idle: all status bits clear (bus idle). */
 		if (SASI_Phase)
 			ret |= 2;		// Busy
