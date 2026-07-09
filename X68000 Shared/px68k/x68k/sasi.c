@@ -346,10 +346,24 @@ BYTE FASTCALL SASI_Read(DWORD adr)
 
 	if (adr==0xe96003)
 	{
-		if (s_scsi_boot_intercept_armed && g_break_on_sasi_probe) {
-			g_sasi_probe_hit = 1;
-			extern c68k_struc C68K;
-			C68k_Release_Cycle(&C68K);   /* stop right after this read */
+		if (s_scsi_boot_intercept_armed) {
+			if (g_break_on_sasi_probe) {
+				g_sasi_probe_hit = 1;
+				extern c68k_struc C68K;
+				C68k_Release_Cycle(&C68K);   /* debug: stop after this read */
+			} else {
+				/* SCSI-boot handoff. The emulator's synthetic-ROM boot relies on
+				 * intercepting the $E96007 SASI device select, but the XVI IPL
+				 * detects devices by reading this status port and never issues
+				 * that select — it falls back to FDD. Trigger the boot injection
+				 * here instead, at the first status probe: the IPL has finished
+				 * its RAM test and set up vectors, and SCSI_InjectBoot() loads
+				 * the HDD boot sector to $2000 and arms a self-contained deferred
+				 * jump, so control transfers to the SCSI boot code. One-shot. */
+				s_scsi_boot_intercept_armed = 0;
+				extern void SCSI_InjectBoot(void);
+				SCSI_InjectBoot();
+			}
 		}
 		/* Phase=0 idle: all status bits clear (bus idle). */
 		if (SASI_Phase)

@@ -2563,6 +2563,17 @@ static void ms_handle(int fd) {
 #endif
         }
 
+        if (strcmp(cmd,"INJECTBOOT")==0) {
+            // Manually fire the SCSI boot injection (loads the HDD boot sector
+            // to $2000 and arms a deferred jump, normally triggered by the
+            // $E96007 select intercept). Experiment: trigger it at a reachable
+            // point when the XVI IPL would otherwise fall back to FDD.
+            MS_REQUIRE_STOP_ACK("must PAUSE before INJECTBOOT");
+            extern void SCSI_InjectBoot(void);
+            SCSI_InjectBoot();
+            ms_ok(fd); continue;
+        }
+
         if (strcmp(cmd,"STEPTO")==0) {
             // Single-step until PC == target (or maxsteps). Safe only across a
             // timer-free deterministic stretch (e.g. the SASI probe after
